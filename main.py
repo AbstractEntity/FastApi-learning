@@ -1,8 +1,11 @@
 from decimal import Decimal
 from enum import Enum
+from typing import Annotated
 
-from fastapi import FastAPI, HTTPException, requests
+from fastapi import FastAPI, HTTPException, Path, Query
 from pydantic import BaseModel
+
+# Uvicorn runs with command uvicorn main:app --reload
 
 app = FastAPI()
 
@@ -23,7 +26,7 @@ class Item(BaseModel):
 items = {
     0: Item(name="Axe", price=999.99, count=1, id=0, category=Category.TOOLS),
     1: Item(name="Hammer", price=690.59, count=1, id=1, category=Category.TOOLS),
-    2: Item(name="Planks", price=400, count=5, id=3, category=Category.CONSUMABLES),
+    2: Item(name="Planks", price=400, count=5, id=2, category=Category.CONSUMABLES),
 }
 
 
@@ -70,12 +73,45 @@ def get_items_by_parameters(
 def post_item(item: Item) -> dict[str, Item]:
     if item.id in items:
         raise HTTPException(
-            status_code=400, detail=f"Item with {item.id} already exists."
+            status_code=400,
+            detail=f"Item with {item.id} already exists.",
         )
     items[item.id] = item
     return {
         "added": item,
     }
+
+
+@app.put("/items/{item_id}")
+def update_item(
+    item_id: Annotated[int | None, Path(ge=0)],
+    name: Annotated[str | None, Query(min_length=1, max_length=12)] = None,
+    price: Annotated[Decimal | None, Query(gt=0)] = None,
+    count: Annotated[int | None, Query(ge=0)] = None,
+    category: Category | None = None,
+) -> dict[str, Item]:
+    if item_id not in items:
+        raise HTTPException(status_code=404, detail=f"Item with {item_id=} not found.")
+    if all(params is None for params in (name, price, count, category)):
+        HTTPException(status_code=400, detail="Parameters to update not provided.")
+    item = items[item_id]
+    if name is not None:
+        item.name = name
+    if price is not None:
+        item.price = price
+    if count is not None:
+        item.count = count
+    if category is not None:
+        item.category = category
+    return {"updated": item}
+
+
+@app.delete("/items/{item_id}")
+def delete_item(item_id: int) -> dict[str, Item]:
+    if item_id not in items:
+        raise HTTPException(status_code=404, detail=f"Item with {item_id=} not found.")
+    item = items.pop(item_id)
+    return {"deleted": item}
 
 
 def main():
