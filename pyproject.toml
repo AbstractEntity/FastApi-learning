@@ -7,6 +7,7 @@ requires-python = ">=3.13"
 dependencies = [
     "fastapi>=0.116.2",
     "requests>=2.32.5",
+    "sqlalchemy>=2.0.43",
     "uvicorn[standart]>=0.35.0",
 ]
 
@@ -74,8 +75,11 @@ lint.extend-select = [
 ]
 
 lint.ignore = [
+    "UP045", # Forces x | None instead of Optional, disable for Pydantic
+    "FAST002", # FastAPI force Annotated
     "S101", # Use of assert
     "PLW2901", # Overwriting loop variable
+    "PLR0913", # Too many arguments in function definition
     "PLR1730", # Replace if with min or max calls where possible
     "PD901", # Using df as DataFrame name
     "E701", # Multiple statements on one line (colon)
@@ -99,3 +103,7 @@ lint.ignore = [
     "TRY003", # Tryceratops - Checks for long exception messages that are not defined in the exception class itself.
     "EM101", # Flake8-errmsg - Checks for the use of string literals in exception constructors.
 ]
+
+[tool.ruff.lint.flake8-bugbear]
+# Allow default arguments like, e.g., `data: List[str] = fastapi.Query(None)`.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]

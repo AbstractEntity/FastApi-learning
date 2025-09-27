@@ -1,122 +1,172 @@
 from decimal import Decimal
 from enum import Enum
-from typing import Annotated
+from typing import Annotated, Optional
 
-from fastapi import FastAPI, HTTPException, Path, Query
+import uvicorn
+from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel
+from sqlalchemy import Column, Integer, Numeric, String, create_engine
+from sqlalchemy import Enum as SQLEnum
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import Session, sessionmaker
 
-# Uvicorn runs with command uvicorn main:app --reload
-
+# Create FastAPI app
 app = FastAPI()
 
 
+# Define the Items SQLAlchemy model
+Base = declarative_base()
+
+
+# Define Category enum to force category options
 class Category(Enum):
-    TOOLS = "tools"
-    CONSUMABLES = "consumables"
+    tools = "tools"
+    consumables = "consumables"
 
 
-class Item(BaseModel):
-    name: str
-    price: Decimal
-    count: int
-    id: int
+class DBItems(Base):
+    __tablename__ = "items"
+    id = Column(Integer, primary_key=True)
+    name = Column(String(30))
+    price = Column(Numeric(10, 2, asdecimal=True))
+    count = Column(Integer)
+    category = Column(SQLEnum(Category, name="category_enum", create_constraint=True))
+
+
+# Create the SQLite database engine
+DATABASE_URL = "sqlite:///./items.db"
+engine = create_engine(DATABASE_URL, connect_args={"check_same_thread": False})
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base.metadata.create_all(bind=engine)
+
+
+# Define Pydantic Items model
+class Items(BaseModel):
+    id: Optional[int] = None
+    name: Annotated[str, Query(min_length=1, max_length=12)]
+    price: Annotated[Decimal, Query(gt=0)]
+    count: Annotated[int, Query(ge=0)]
     category: Category
 
 
-items = {
-    0: Item(name="Axe", price=999.99, count=1, id=0, category=Category.TOOLS),
-    1: Item(name="Hammer", price=690.59, count=1, id=1, category=Category.TOOLS),
-    2: Item(name="Planks", price=400, count=5, id=2, category=Category.CONSUMABLES),
-}
+# Define Pydantic Item model for querying and updating
+class UpdateItem(BaseModel):
+    name: Annotated[str | None, Query(min_length=1, max_length=12)] = None
+    price: Annotated[Decimal | None, Query(gt=0)] = None
+    count: Annotated[int | None, Query(ge=0)] = None
+    category: Optional[Category] = None
 
 
-@app.get("/")
-def index() -> dict[str, dict[int, Item]]:
-    return {"items": items}
+# Dependency: Get the session
+def get_session():
+    db = SessionLocal()
+    try:
+        yield db
+    finally:
+        db.close()
 
 
-@app.get("/items/{item_id}")
-def get_item_by_id(item_id: int) -> Item:
-    if item_id not in items:
-        raise HTTPException(status_code=404, detail=f"Item with {item_id} not found.")
-    return items[item_id]
+# Add an Item
+@app.post("/", response_model=Items)
+def post_item(item: Items, session: Session = Depends(get_session)):
+    db_item = DBItems(**item.model_dump())
+    session.add(db_item)
+    session.commit()
+    session.refresh(db_item)
+    return db_item
 
 
-Selection = dict[str, str | int | Decimal | Category | None]
+# Get list of items
+@app.get("/", response_model=list[Items])
+def get_items(skip: int = 0, limit: int = 50, session: Session = Depends(get_session)):
+    items = session.query(DBItems).offset(skip).limit(limit).all()
+    return items
 
 
-@app.get("/items/")
-def get_items_by_parameters(
+# Get an item by ID
+@app.get("/items/{item_id}", response_model=Items)
+def read_item(item_id: int, session: Session = Depends(get_session)):
+    item = session.query(DBItems).filter(DBItems.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return item
+
+
+# Get items by query with json payload
+# @app.get("/items/", response_model=list[Items])
+# def query_items(
+#     item: UpdateItem,
+#     limit: int = 50,
+#     session: Session = Depends(get_session),
+# ):
+#     selection = (
+#         session.query(DBItems)
+#         .filter(
+#             item.name is None or DBItems.name == item.name,
+#             item.price is None or DBItems.price == item.price,
+#             item.count is None or DBItems.count == item.count,
+#             item.category is None or DBItems.category == item.category,
+#         )
+#         .limit(limit)
+#     )
+#     if not selection.first():
+#         raise HTTPException(status_code=404, detail="Items not found")
+#     return selection
+
+
+# Get items by query
+@app.get("/items/", response_model=list[Items])
+def query_items(
     name: str | None = None,
     price: Decimal | None = None,
     count: int | None = None,
-    category: Category | None = None,
-) -> dict[str, Selection | list]:
-    def check_item(item: Item) -> bool:
-        return all(
-            (
-                name is None or item.name == name,
-                price is None or item.price == price,
-                count is None or item.count == count,
-                category is None or item.category is category,
-            ),
+    category: str | None = None,
+    limit: int = 50,
+    session: Session = Depends(get_session),
+):
+    selection = (
+        session.query(DBItems)
+        .filter(
+            name is None or DBItems.name == name,
+            price is None or DBItems.price == price,
+            count is None or DBItems.count == count,
+            category is None or DBItems.category == category,
         )
-
-    selection = [item for item in items.values() if check_item(item)]
-    return {
-        "query": {"name": name, "price": price, "count": count, "category": category},
-        "selection": selection,
-    }
-
-
-@app.post("/")
-def post_item(item: Item) -> dict[str, Item]:
-    if item.id in items:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Item with {item.id} already exists.",
-        )
-    items[item.id] = item
-    return {
-        "added": item,
-    }
+        .limit(limit)
+    )
+    if not selection.first():
+        raise HTTPException(status_code=404, detail="Items not found")
+    return selection
 
 
-@app.put("/items/{item_id}")
+# Delete Item by item_id
+@app.delete("/items/{item_id}", response_model=Items)
+def delete_item(item_id: int, session: Session = Depends(get_session)):
+    item = session.query(DBItems).filter(DBItems.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    session.delete(item)
+    session.commit()
+    return item
+
+
+# Update an Item
+@app.patch("/items/{item_id}", response_model=Items)
 def update_item(
-    item_id: Annotated[int | None, Path(ge=0)],
-    name: Annotated[str | None, Query(min_length=1, max_length=12)] = None,
-    price: Annotated[Decimal | None, Query(gt=0)] = None,
-    count: Annotated[int | None, Query(ge=0)] = None,
-    category: Category | None = None,
-) -> dict[str, Item]:
-    if item_id not in items:
-        raise HTTPException(status_code=404, detail=f"Item with {item_id=} not found.")
-    if all(params is None for params in (name, price, count, category)):
-        HTTPException(status_code=400, detail="Parameters to update not provided.")
-    item = items[item_id]
-    if name is not None:
-        item.name = name
-    if price is not None:
-        item.price = price
-    if count is not None:
-        item.count = count
-    if category is not None:
-        item.category = category
-    return {"updated": item}
+    item_id: int,
+    item_data: UpdateItem,
+    session: Session = Depends(get_session),
+):
+    item = session.query(DBItems).filter(DBItems.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Item not found")
+    for field, value in item_data.model_dump(exclude_unset=True).items():
+        setattr(item, field, value)
 
-
-@app.delete("/items/{item_id}")
-def delete_item(item_id: int) -> dict[str, Item]:
-    if item_id not in items:
-        raise HTTPException(status_code=404, detail=f"Item with {item_id=} not found.")
-    item = items.pop(item_id)
-    return {"deleted": item}
-
-
-def main():
-    print("Hello from fastapi-test!")
+    session.commit()
+    session.refresh(item)
+    return item
 
 
 if __name__ == "__main__":
-    main()
+    uvicorn.run(app, host="127.0.0.1", port=8000)
